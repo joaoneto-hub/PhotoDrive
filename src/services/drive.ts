@@ -1,6 +1,6 @@
 import type { Photo, Folder } from "@/types/photo";
 import { db } from "@/lib/firebase";
-import { doc, getDoc, setDoc } from "firebase/firestore";
+import { doc, getDoc } from "firebase/firestore";
 import { auth } from "@/lib/firebase";
 import { DRIVE_API_BASE_URL } from "@/config/constants";
 
@@ -10,39 +10,6 @@ interface DriveFile {
   mimeType?: string;
   parents?: string[];
 }
-
-const getAccessToken = () => {
-  const token = localStorage.getItem("googleAccessToken");
-  if (!token) {
-    throw new Error("No access token found");
-  }
-  return token;
-};
-
-const hasDriveAccess = () => {
-  return localStorage.getItem("hasDriveAccess") === "true";
-};
-
-const getSharedFolderId = async () => {
-  const user = auth.currentUser;
-  if (!user) {
-    throw new Error("No user logged in");
-  }
-
-  const userDoc = await getDoc(doc(db, "users", user.uid));
-  if (!userDoc.exists()) {
-    console.log("No user document found");
-    throw new Error("No user document found");
-  }
-
-  const sharedFolderId = userDoc.data().sharedFolderId;
-  if (!sharedFolderId) {
-    throw new Error("No shared folder ID found");
-  }
-
-  console.log("Shared folder ID:", sharedFolderId);
-  return sharedFolderId.split("?")[0]; // Remove o parâmetro ?usp=sharing se existir
-};
 
 export const driveService = {
   async listFolders(parentFolderId?: string): Promise<Array<Photo | Folder>> {
@@ -93,7 +60,7 @@ export const driveService = {
       });
 
       // Ordenar os arquivos: pastas primeiro, depois arquivos
-      files.sort((a, b) => {
+      files.sort((a: Photo | Folder, b: Photo | Folder) => {
         const aIsFolder = !("mimeType" in a);
         const bIsFolder = !("mimeType" in b);
         if (aIsFolder && !bIsFolder) return -1;

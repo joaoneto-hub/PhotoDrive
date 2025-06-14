@@ -1,6 +1,6 @@
 // src/routes/Routes.tsx
 import { BrowserRouter, Routes, Route } from "react-router-dom";
-import { PrivateRoute } from "./PrivateRoute";
+import { PrivateRoute } from "./PrivateRoute.tsx";
 import Login from "../pages/Login/index";
 import Dashboard from "../pages/Home/index";
 

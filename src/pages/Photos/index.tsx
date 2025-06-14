@@ -101,7 +101,7 @@ export default function Photos() {
     },
   };
 
-  const item = {
+  const itemAnimation = {
     hidden: { opacity: 0, y: 20 },
     show: { opacity: 1, y: 0 },
   };
@@ -202,7 +202,7 @@ export default function Photos() {
               {items.map((item) => (
                 <motion.div
                   key={item.id}
-                  variants={item}
+                  variants={itemAnimation}
                   layout
                   className="group"
                   onClick={() => handleItemClick(item)}
