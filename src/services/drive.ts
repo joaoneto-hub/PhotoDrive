@@ -1,235 +1,417 @@
-import { auth } from "@/lib/firebase";
-import { DRIVE_API_BASE_URL } from "@/config/constants";
-import { db } from "@/lib/firebase";
+import { getAuth } from "firebase/auth";
 import { doc, getDoc, setDoc } from "firebase/firestore";
+import { db } from "@/lib/firebase";
 
-interface DriveFile {
-  id: string;
-  name: string;
-  mimeType?: string;
-  parents?: string[];
-  thumbnailLink?: string;
-  webContentLink?: string;
-}
-
-interface DriveItem {
+interface GoogleDriveFile {
   id: string;
   name: string;
   mimeType: string;
-  parentId: string;
-  thumbnailLink: string;
-  webContentLink: string;
+  thumbnailLink?: string;
+  webContentLink?: string;
+  parents?: string[];
+}
+
+export interface DriveItem {
+  id: string;
+  name: string;
+  mimeType: string;
+  thumbnailLink?: string;
+  webContentLink?: string;
   isFolder: boolean;
   isImage: boolean;
   isVideo: boolean;
+  items?: DriveItem[];
 }
 
-interface DriveFolder {
-  id: string;
-  name: string;
-  parentId?: string;
+export interface DriveFolder extends DriveItem {
+  items: DriveItem[];
 }
 
-interface DriveResponse {
-  files: DriveFile[];
-}
+class DriveService {
+  private async getAccessToken(): Promise<string> {
+    const auth = getAuth();
+    const user = auth.currentUser;
+    if (!user) {
+      throw new Error("No user logged in");
+    }
 
-export const driveService = {
+    // Tentar obter o token do localStorage primeiro
+    const storedToken = localStorage.getItem("googleAccessToken");
+    if (storedToken) {
+      return storedToken;
+    }
+
+    // Se não houver token armazenado, forçar uma atualização do token
+    const token = await user.getIdToken(true);
+    localStorage.setItem("googleAccessToken", token);
+    localStorage.setItem("accessToken", token);
+    return token;
+  }
+
+  async getSharedFolderId(): Promise<string> {
+    const auth = getAuth();
+    const user = auth.currentUser;
+    if (!user) {
+      throw new Error("No user logged in");
+    }
+
+    const userDoc = await getDoc(doc(db, "users", user.uid));
+    if (!userDoc.exists()) {
+      throw new Error("User document not found");
+    }
+
+    const userData = userDoc.data();
+    const sharedFolderId = userData.sharedFolderId;
+    if (!sharedFolderId) {
+      throw new Error("No shared folder ID found");
+    }
+
+    return sharedFolderId;
+  }
+
+  async listAllFiles(folderId?: string): Promise<DriveItem[]> {
+    const accessToken = await this.getAccessToken();
+    const hasDriveAccess = localStorage.getItem("hasDriveAccess") === "true";
+
+    let query = "https://www.googleapis.com/drive/v3/files?";
+
+    // Se tiver acesso geral, usa a lógica normal
+    if (hasDriveAccess) {
+      if (folderId) {
+        query += `q='${folderId}' in parents and trashed=false&`;
+      } else {
+        query += "q=trashed=false&";
+      }
+    }
+    // Se não tiver acesso geral, usa a lógica do link compartilhado
+    else {
+      const sharedFolderId = await this.getSharedFolderId();
+      if (!sharedFolderId) {
+        throw new Error("Shared folder ID not found");
+      }
+      query += `q='${sharedFolderId}' in parents and trashed=false&`;
+    }
+
+    query +=
+      "fields=files(id,name,mimeType,thumbnailLink,webContentLink,parents)&orderBy=name";
+
+    try {
+      const response = await fetch(query, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      });
+
+      if (!response.ok) {
+        if (response.status === 401) {
+          // Token expirado, tentar renovar
+          const newToken = await this.getAccessToken();
+          const retryResponse = await fetch(query, {
+            headers: {
+              Authorization: `Bearer ${newToken}`,
+            },
+          });
+
+          if (!retryResponse.ok) {
+            throw new Error(
+              `Failed to list files after token refresh: ${retryResponse.status} ${retryResponse.statusText}`
+            );
+          }
+
+          const data = await retryResponse.json();
+          return this.mapDriveFiles(data.files);
+        }
+        throw new Error(
+          `Failed to list files: ${response.status} ${response.statusText}`
+        );
+      }
+
+      const data = await response.json();
+      return this.mapDriveFiles(data.files);
+    } catch (error) {
+      console.error("Error in listAllFiles:", error);
+      throw error;
+    }
+  }
+
+  private mapDriveFiles(files: GoogleDriveFile[]): DriveItem[] {
+    return files.map((file) => ({
+      ...file,
+      isFolder: file.mimeType === "application/vnd.google-apps.folder",
+      isImage: file.mimeType.startsWith("image/"),
+      isVideo: file.mimeType.startsWith("video/"),
+    }));
+  }
+
+  async listFolders(folderId?: string): Promise<DriveItem[]> {
+    const accessToken = await this.getAccessToken();
+    const hasDriveAccess = localStorage.getItem("hasDriveAccess") === "true";
+
+    let query = "https://www.googleapis.com/drive/v3/files?";
+
+    // Se tiver acesso geral, usa a lógica normal
+    if (hasDriveAccess) {
+      if (folderId && folderId !== "root") {
+        query += `q='${folderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false&`;
+      } else {
+        query +=
+          "q=mimeType='application/vnd.google-apps.folder' and trashed=false&";
+      }
+    }
+    // Se não tiver acesso geral, usa a lógica do link compartilhado
+    else {
+      const sharedFolderId = await this.getSharedFolderId();
+      if (!sharedFolderId) {
+        throw new Error("Shared folder ID not found");
+      }
+      // Se tiver um folderId específico, usa ele, senão usa o sharedFolderId
+      const targetFolderId = folderId || sharedFolderId;
+      query += `q='${targetFolderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false&`;
+    }
+
+    query +=
+      "fields=files(id,name,mimeType,thumbnailLink,webContentLink)&orderBy=name";
+
+    try {
+      const response = await fetch(query, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      });
+
+      if (!response.ok) {
+        if (response.status === 401) {
+          // Token expirado, tentar renovar
+          const newToken = await this.getAccessToken();
+          const retryResponse = await fetch(query, {
+            headers: {
+              Authorization: `Bearer ${newToken}`,
+            },
+          });
+
+          if (!retryResponse.ok) {
+            throw new Error(
+              `Failed to list folders after token refresh: ${retryResponse.status} ${retryResponse.statusText}`
+            );
+          }
+
+          const data = await retryResponse.json();
+          return this.mapDriveFiles(data.files);
+        }
+        throw new Error(
+          `Failed to list folders: ${response.status} ${response.statusText}`
+        );
+      }
+
+      const data = await response.json();
+      return this.mapDriveFiles(data.files);
+    } catch (error) {
+      console.error("Error in listFolders:", error);
+      throw error;
+    }
+  }
+
+  async getFolderInfo(folderId: string): Promise<DriveFolder> {
+    const accessToken = await this.getAccessToken();
+    const items = await this.listFolders(folderId);
+
+    const response = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${folderId}?fields=id,name,mimeType`,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      }
+    );
+
+    if (!response.ok) {
+      if (response.status === 401) {
+        // Token expirado, tentar renovar
+        const newToken = await this.getAccessToken();
+        const retryResponse = await fetch(
+          `https://www.googleapis.com/drive/v3/files/${folderId}?fields=id,name,mimeType`,
+          {
+            headers: {
+              Authorization: `Bearer ${newToken}`,
+            },
+          }
+        );
+
+        if (!retryResponse.ok) {
+          throw new Error("Failed to get folder info after token refresh");
+        }
+
+        const folderInfo = await retryResponse.json();
+        return {
+          ...folderInfo,
+          isFolder: true,
+          isImage: false,
+          isVideo: false,
+          items,
+        };
+      }
+      throw new Error("Failed to get folder info");
+    }
+
+    const folderInfo = await response.json();
+    return {
+      ...folderInfo,
+      isFolder: true,
+      isImage: false,
+      isVideo: false,
+      items,
+    };
+  }
+
   async getFolderPath(folderId: string): Promise<DriveFolder[]> {
+    const accessToken = await this.getAccessToken();
     const path: DriveFolder[] = [];
-    let currentId = folderId;
 
+    let currentId = folderId;
     while (currentId) {
-      const folder = await this.getFolderInfo(currentId);
-      path.unshift(folder);
-      currentId = folder.parentId || "";
+      const response = await fetch(
+        `https://www.googleapis.com/drive/v3/files/${currentId}?fields=id,name,mimeType,parents`,
+        {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+        }
+      );
+
+      if (!response.ok) {
+        if (response.status === 401) {
+          // Token expirado, tentar renovar
+          const newToken = await this.getAccessToken();
+          const retryResponse = await fetch(
+            `https://www.googleapis.com/drive/v3/files/${currentId}?fields=id,name,mimeType,parents`,
+            {
+              headers: {
+                Authorization: `Bearer ${newToken}`,
+              },
+            }
+          );
+
+          if (!retryResponse.ok) {
+            throw new Error("Failed to get folder path after token refresh");
+          }
+
+          const folderInfo = await retryResponse.json();
+          path.unshift({
+            ...folderInfo,
+            isFolder: true,
+            isImage: false,
+            isVideo: false,
+            items: [],
+          });
+
+          if (!folderInfo.parents || folderInfo.parents.length === 0) {
+            break;
+          }
+
+          currentId = folderInfo.parents[0];
+          continue;
+        }
+        throw new Error("Failed to get folder path");
+      }
+
+      const folderInfo = await response.json();
+      path.unshift({
+        ...folderInfo,
+        isFolder: true,
+        isImage: false,
+        isVideo: false,
+        items: [],
+      });
+
+      if (!folderInfo.parents || folderInfo.parents.length === 0) {
+        break;
+      }
+
+      currentId = folderInfo.parents[0];
     }
 
     return path;
-  },
+  }
 
-  async listFolders(folderId: string = "root"): Promise<DriveItem[]> {
+  async searchItems(query: string): Promise<DriveItem[]> {
+    const accessToken = await this.getAccessToken();
+    const hasDriveAccess = localStorage.getItem("hasDriveAccess") === "true";
+
+    let searchQuery = "https://www.googleapis.com/drive/v3/files?";
+
+    // Se tiver acesso geral, usa a lógica normal
+    if (hasDriveAccess) {
+      searchQuery += `q=name contains '${query}' and trashed=false`;
+    }
+    // Se não tiver acesso geral, usa a lógica do link compartilhado
+    else {
+      const sharedFolderId = await this.getSharedFolderId();
+      if (!sharedFolderId) {
+        throw new Error("Shared folder ID not found");
+      }
+      searchQuery += `q=name contains '${query}' and '${sharedFolderId}' in parents and trashed=false`;
+    }
+
+    searchQuery +=
+      "&fields=files(id,name,mimeType,thumbnailLink,webContentLink)&orderBy=name";
+
     try {
-      const hasFullAccess = localStorage.getItem("hasDriveAccess") === "true";
-      const accessToken = hasFullAccess
-        ? await this.getAccessToken()
-        : await this.getSharedAccessToken();
-
-      if (!accessToken) {
-        throw new Error("No access token available");
-      }
-
-      const targetFolderId = hasFullAccess
-        ? folderId
-        : folderId === "root"
-        ? await this.getSharedFolderId()
-        : folderId;
-
-      if (!targetFolderId) {
-        throw new Error("No folder ID available");
-      }
-
-      console.log("Listing folders with token:", accessToken);
-      console.log("Target folder ID:", targetFolderId);
-
-      const query = `'${targetFolderId}' in parents and trashed=false`;
-      console.log("Query:", query);
-
-      const response = await fetch(
-        `${DRIVE_API_BASE_URL}/files?q=${encodeURIComponent(query)}&fields=files(id,name,mimeType,parents,thumbnailLink,webContentLink)&spaces=drive&pageSize=1000&orderBy=name`,
-        {
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-          },
-        }
-      );
-
-      if (!response.ok) {
-        throw new Error(`Failed to fetch files: ${response.status} ${response.statusText}`);
-      }
-
-      const data = await response.json() as DriveResponse;
-      console.log("Drive API response:", data);
-
-      if (!data.files || !Array.isArray(data.files)) {
-        console.log("No files found in response");
-        return [];
-      }
-
-      return data.files.map((file: DriveFile) => {
-        const isFolder = file.mimeType === "application/vnd.google-apps.folder";
-        const isImage = file.mimeType?.startsWith("image/") || false;
-        const isVideo = file.mimeType?.startsWith("video/") || false;
-
-        console.log("Processing file:", {
-          name: file.name,
-          mimeType: file.mimeType,
-          isFolder,
-          isImage,
-          isVideo,
-        });
-
-        return {
-          id: file.id || "",
-          name: file.name || "",
-          mimeType: file.mimeType || "",
-          parentId: file.parents?.[0] || "",
-          thumbnailLink: file.thumbnailLink || "",
-          webContentLink: file.webContentLink || "",
-          isFolder,
-          isImage,
-          isVideo,
-        };
+      const response = await fetch(searchQuery, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
       });
-    } catch (error) {
-      console.error("Error listing folders:", error);
-      throw error;
-    }
-  },
-
-  async getAccessToken(): Promise<string> {
-    const token = localStorage.getItem("googleAccessToken");
-    if (!token) {
-      throw new Error("No access token found");
-    }
-    return token;
-  },
-
-  async getSharedAccessToken(): Promise<string> {
-    const token = localStorage.getItem("accessToken") || localStorage.getItem("googleAccessToken");
-    if (!token) {
-      throw new Error("No access token found");
-    }
-    return token;
-  },
-
-  async getFolderInfo(folderId: string): Promise<DriveFolder> {
-    try {
-      const accessToken = await this.getAccessToken();
-      const response = await fetch(
-        `${DRIVE_API_BASE_URL}/files/${folderId}?fields=id,name,parents`,
-        {
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-          },
-        }
-      );
 
       if (!response.ok) {
-        throw new Error(`Failed to fetch folder info: ${response.status} ${response.statusText}`);
+        if (response.status === 401) {
+          // Token expirado, tentar renovar
+          const newToken = await this.getAccessToken();
+          const retryResponse = await fetch(searchQuery, {
+            headers: {
+              Authorization: `Bearer ${newToken}`,
+            },
+          });
+
+          if (!retryResponse.ok) {
+            throw new Error(
+              `Failed to search items after token refresh: ${retryResponse.status} ${retryResponse.statusText}`
+            );
+          }
+
+          const data = await retryResponse.json();
+          return this.mapDriveFiles(data.files);
+        }
+        throw new Error(
+          `Failed to search items: ${response.status} ${response.statusText}`
+        );
       }
 
-      const folder = await response.json();
-      return {
-        id: folder.id,
-        name: folder.name,
-        parentId: folder.parents?.[0],
-      };
+      const data = await response.json();
+      return this.mapDriveFiles(data.files);
     } catch (error) {
-      console.error("Error getting folder info:", error);
+      console.error("Error in searchItems:", error);
       throw error;
     }
-  },
+  }
 
   async saveSharedFolderId(folderId: string): Promise<void> {
-    try {
-      const user = auth.currentUser;
-      if (!user) {
-        throw new Error("No user logged in");
-      }
-
-      // Limpar o ID da pasta
-      const cleanFolderId = folderId.split("/").pop()?.split("?")[0];
-      if (!cleanFolderId) {
-        throw new Error("Invalid folder ID format");
-      }
-
-      // Salvar no Firestore
-      await setDoc(doc(db, "users", user.uid), {
-        sharedFolderId: cleanFolderId,
-      });
-
-      // Salvar no localStorage
-      localStorage.setItem("sharedFolderId", cleanFolderId);
-      console.log("Saved shared folder ID:", cleanFolderId);
-    } catch (error) {
-      console.error("Error saving shared folder ID:", error);
-      throw error;
+    const auth = getAuth();
+    const user = auth.currentUser;
+    if (!user) {
+      throw new Error("No user logged in");
     }
-  },
 
-  async removeSharedFolderId(): Promise<void> {
-    localStorage.removeItem("sharedFolderId");
-  },
+    await setDoc(
+      doc(db, "users", user.uid),
+      {
+        sharedFolderId: folderId,
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
 
-  async getSharedFolderId(): Promise<string> {
-    try {
-      const user = auth.currentUser;
-      if (!user) {
-        throw new Error("No user logged in");
-      }
+    localStorage.setItem("sharedFolderId", folderId);
+  }
+}
 
-      // Tentar obter do localStorage primeiro
-      const localFolderId = localStorage.getItem("sharedFolderId");
-      if (localFolderId) {
-        return localFolderId;
-      }
-
-      // Se não estiver no localStorage, tentar obter do Firestore
-      const userDoc = await getDoc(doc(db, "users", user.uid));
-      if (userDoc.exists()) {
-        const data = userDoc.data();
-        if (data.sharedFolderId) {
-          // Salvar no localStorage para futuras consultas
-          localStorage.setItem("sharedFolderId", data.sharedFolderId);
-          return data.sharedFolderId;
-        }
-      }
-
-      throw new Error("No shared folder ID found");
-    } catch (error) {
-      console.error("Error getting shared folder ID:", error);
-      throw error;
-    }
-  },
-};
+export const driveService = new DriveService();

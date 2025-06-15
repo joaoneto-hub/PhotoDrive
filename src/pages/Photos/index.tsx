@@ -1,299 +1,384 @@
-import { useState, useEffect } from "react";
-import { useNavigate, useParams } from "react-router-dom";
-import { driveService } from "@/services/drive";
-import type { Photo, Folder } from "@/types/photo";
+import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import {
-  ChevronLeft,
-  ChevronRight,
-  Home,
-  FolderIcon,
-  ImageIcon,
-  VideoIcon,
-  Loader2,
-} from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { Loading } from "@/components/ui/loading";
 import { useToast } from "@/hooks/use-toast";
-import { motion, AnimatePresence } from "framer-motion";
-import { cn } from "@/lib/utils";
+import { driveService } from "@/services/drive";
+import { authService } from "@/services/auth";
+import { useUserData } from "@/hooks/use-user-data";
 import { PhotoModal } from "@/components/PhotoModal";
+import {
+  Folder,
+  Image,
+  Video,
+  ArrowLeft,
+  Filter,
+  ChevronDown,
+  Search,
+} from "lucide-react";
+import type { DriveItem } from "@/services/drive";
 
-export default function Photos() {
-  const { folderId } = useParams();
+const Photos = () => {
   const navigate = useNavigate();
+  const [items, setItems] = useState<DriveItem[]>([]);
+  const [allItems, setAllItems] = useState<DriveItem[]>([]);
+  const [currentFolder, setCurrentFolder] = useState<DriveItem | null>(null);
+  const [folderPath, setFolderPath] = useState<DriveItem[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [selectedPhoto, setSelectedPhoto] = useState<DriveItem | null>(null);
+  const [filterType, setFilterType] = useState<
+    "all" | "images" | "videos" | "folders"
+  >("all");
+  const [showFilterMenu, setShowFilterMenu] = useState(false);
+  const [nameFilter, setNameFilter] = useState("");
   const { toast } = useToast();
-  const [items, setItems] = useState<Array<Photo | Folder>>([]);
-  const [loading, setLoading] = useState(true);
-  const [currentFolder, setCurrentFolder] = useState<Folder | null>(null);
-  const [folderPath, setFolderPath] = useState<Folder[]>([]);
-  const [selectedPhoto, setSelectedPhoto] = useState<Photo | null>(null);
-  const [photoUrl, setPhotoUrl] = useState<string | null>(null);
-  const [isLoadingMedia, setIsLoadingMedia] = useState(false);
+  const { userData } = useUserData();
+
+  const filterItems = (items: DriveItem[]) => {
+    return items.filter((item) => {
+      // Filtro por nome
+      if (
+        nameFilter &&
+        !item.name.toLowerCase().includes(nameFilter.toLowerCase())
+      ) {
+        return false;
+      }
+
+      // Verifica se é uma pasta
+      if (item.mimeType === "application/vnd.google-apps.folder") {
+        return filterType === "all" || filterType === "folders";
+      }
+      // Verifica se é uma imagem
+      if (item.mimeType.startsWith("image/")) {
+        return filterType === "all" || filterType === "images";
+      }
+      // Verifica se é um vídeo
+      if (item.mimeType.startsWith("video/")) {
+        return filterType === "all" || filterType === "videos";
+      }
+      return false;
+    });
+  };
 
   useEffect(() => {
-    const fetchItems = async () => {
+    const loadItems = async () => {
       try {
-        setLoading(true);
-        const folderIdToUse = folderId || undefined;
-        const fetchedItems = await driveService.listFolders(folderIdToUse);
-        setItems(fetchedItems);
-
-        if (folderIdToUse) {
-          const folderInfo = await driveService.getFolderInfo(folderIdToUse);
-          setCurrentFolder(folderInfo);
-          const path = await driveService.getFolderPath(folderIdToUse);
-          setFolderPath(path);
-        } else {
-          setCurrentFolder(null);
-          setFolderPath([]);
+        setIsLoading(true);
+        const user = authService.getCurrentUser();
+        if (!user) {
+          navigate("/login");
+          return;
         }
-      } catch (error) {
-        console.error("Error fetching items:", error);
-        let errorMessage = "Não foi possível carregar os itens";
 
-        if (error instanceof Error) {
-          if (error.message === "No shared folder ID found") {
-            errorMessage =
-              "Nenhuma pasta compartilhada encontrada. Por favor, compartilhe uma pasta primeiro.";
-          } else if (error.message === "No user logged in") {
-            errorMessage =
-              "Você precisa estar logado para acessar esta página.";
-          } else if (error.message === "Folder not accessible") {
-            errorMessage = "Você não tem permissão para acessar esta pasta.";
+        const hasDriveAccess =
+          localStorage.getItem("hasDriveAccess") === "true";
+        let folderId: string | undefined;
+
+        if (!hasDriveAccess) {
+          folderId = await driveService.getSharedFolderId();
+        } else {
+          // Quando tem acesso geral, carrega diretamente os itens do Drive raiz
+          const rootFolder = await driveService.getFolderInfo("root");
+          const fetchedItems = await driveService.listAllFiles("root");
+          setAllItems(fetchedItems);
+          const filteredItems = filterItems(fetchedItems);
+          setItems(filteredItems);
+          setCurrentFolder(rootFolder);
+          setFolderPath([rootFolder]);
+          setIsLoading(false);
+          return;
+        }
+
+        const fetchedItems = await driveService.listAllFiles(folderId);
+        setAllItems(fetchedItems);
+        const filteredItems = filterItems(fetchedItems);
+        setItems(filteredItems);
+
+        // Se não tiver acesso total, definir a pasta compartilhada como pasta atual
+        if (!hasDriveAccess && folderId) {
+          const sharedFolder = fetchedItems.find(
+            (item) => item.id === folderId
+          );
+          if (sharedFolder) {
+            setCurrentFolder(sharedFolder);
+            setFolderPath([sharedFolder]);
           }
         }
-
+      } catch (error) {
+        console.error("Error loading items:", error);
         toast({
           title: "Erro",
-          description: errorMessage,
+          description: "Não foi possível carregar os itens",
           variant: "destructive",
         });
       } finally {
-        setLoading(false);
+        setIsLoading(false);
       }
     };
 
-    fetchItems();
-  }, [folderId, toast]);
+    if (userData) {
+      loadItems();
+    }
+  }, [navigate, toast, userData]);
 
-  const handleItemClick = async (item: Photo | Folder) => {
-    if ("mimeType" in item) {
-      // É uma foto ou vídeo
+  const handleItemClick = async (item: DriveItem) => {
+    if (item.mimeType === "application/vnd.google-apps.folder") {
       try {
-        setIsLoadingMedia(true);
-        console.log("Tentando abrir mídia:", item);
-        const url = await driveService.getPhotoUrl(item.id);
-        console.log("URL obtida:", url);
-        setSelectedPhoto(item);
-        setPhotoUrl(url);
+        setIsLoading(true);
+        const folderInfo = await driveService.getFolderInfo(item.id);
+        const fetchedItems = folderInfo.items || [];
+        setAllItems(fetchedItems);
+        const filteredItems = filterItems(fetchedItems);
+        setCurrentFolder(folderInfo);
+        setFolderPath([...folderPath, item]);
+        setItems(filteredItems);
       } catch (error) {
-        console.error("Error opening media:", error);
+        console.error("Error loading folder:", error);
         toast({
           title: "Erro",
-          description: "Não foi possível abrir o arquivo",
+          description: "Não foi possível carregar a pasta",
           variant: "destructive",
         });
       } finally {
-        setIsLoadingMedia(false);
+        setIsLoading(false);
       }
-    } else {
-      // É uma pasta
-      navigate(`/photos/${item.id}`);
+    } else if (
+      item.mimeType.startsWith("image/") ||
+      item.mimeType.startsWith("video/")
+    ) {
+      setSelectedPhoto(item);
     }
   };
 
-  const handleCloseModal = () => {
-    setSelectedPhoto(null);
-    setPhotoUrl(null);
-  };
+  const handleBackClick = async () => {
+    if (folderPath.length === 0) {
+      return;
+    }
 
-  const handleBack = () => {
-    if (currentFolder) {
-      navigate("/photos");
+    try {
+      setIsLoading(true);
+      const newPath = [...folderPath];
+      newPath.pop();
+      setFolderPath(newPath);
+
+      if (newPath.length === 0) {
+        const hasDriveAccess =
+          localStorage.getItem("hasDriveAccess") === "true";
+        let folderId: string | undefined;
+
+        if (!hasDriveAccess) {
+          folderId = await driveService.getSharedFolderId();
+        } else {
+          // Quando tem acesso geral, carrega a pasta raiz do Drive
+          folderId = "root";
+        }
+
+        const fetchedItems = await driveService.listAllFiles(folderId);
+        setAllItems(fetchedItems);
+        const filteredItems = filterItems(fetchedItems);
+        setItems(filteredItems);
+        setCurrentFolder(null);
+      } else {
+        const lastFolder = newPath[newPath.length - 1];
+        const folderInfo = await driveService.getFolderInfo(lastFolder.id);
+        const fetchedItems = folderInfo.items || [];
+        setAllItems(fetchedItems);
+        const filteredItems = filterItems(fetchedItems);
+        setCurrentFolder(folderInfo);
+        setItems(filteredItems);
+      }
+    } catch (error) {
+      console.error("Error going back:", error);
+      toast({
+        title: "Erro",
+        description: "Não foi possível voltar para a pasta anterior",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoading(false);
     }
   };
 
-  const handlePathClick = (folder: Folder) => {
-    navigate(`/photos/${folder.id}`);
+  const handleFilterByName = () => {
+    const filteredItems = filterItems(allItems);
+    setItems(filteredItems);
   };
 
-  if (loading) {
+  const renderItem = (item: DriveItem) => {
+    const isFolder = item.mimeType === "application/vnd.google-apps.folder";
+    const isVideo = item.mimeType.startsWith("video/");
+    const Icon = isFolder ? Folder : isVideo ? Video : Image;
+
     return (
-      <div className="p-4 md:p-6 w-full h-full">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
-          {[...Array(10)].map((_, index) => (
-            <div
-              key={index}
-              className="h-24 bg-slate-800 rounded-lg animate-pulse"
+      <div
+        key={item.id}
+        className="relative group cursor-pointer"
+        onClick={() => handleItemClick(item)}
+      >
+        <div className="aspect-square rounded-lg overflow-hidden bg-slate-800">
+          {item.thumbnailLink ? (
+            <img
+              src={item.thumbnailLink}
+              alt={item.name}
+              className="w-full h-full object-cover"
             />
-          ))}
+          ) : (
+            <div className="w-full h-full flex items-center justify-center">
+              <Icon className="w-12 h-12 text-slate-600" />
+            </div>
+          )}
         </div>
+        <div className="mt-2 text-sm text-slate-300 truncate">{item.name}</div>
+      </div>
+    );
+  };
+
+  if (!userData) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <Loading className="w-8 h-8" />
       </div>
     );
   }
 
-  const container = {
-    hidden: { opacity: 0 },
-    show: {
-      opacity: 1,
-      transition: {
-        staggerChildren: 0.1,
-      },
-    },
-  };
-
-  const itemAnimation = {
-    hidden: { opacity: 0, y: 20 },
-    show: { opacity: 1, y: 0 },
-  };
-
-  const renderItem = (item: Photo | Folder) => {
-    // Verificar o tipo do item usando o mimeType
-    const isFolder = item.mimeType === "application/vnd.google-apps.folder";
-    const isImage = !isFolder && item.mimeType?.startsWith("image/");
-    const isVideo = !isFolder && item.mimeType?.startsWith("video/");
-
-    console.log("Rendering item:", {
-      name: item.name,
-      mimeType: item.mimeType,
-      isFolder,
-      isVideo,
-      isImage,
-    });
-
-    return (
-      <motion.div
-        layout
-        className="flex items-center p-3 md:p-4 bg-slate-800 rounded-lg hover:bg-slate-700 transition-colors cursor-pointer"
-        whileHover={{ scale: 1.02 }}
-        transition={{ duration: 0.2 }}
-      >
-        {isFolder ? (
-          <FolderIcon className="h-5 w-5 md:h-6 md:w-6 text-primary mr-2 md:mr-3" />
-        ) : isVideo ? (
-          <VideoIcon className="h-5 w-5 md:h-6 md:w-6 text-primary mr-2 md:mr-3" />
-        ) : isImage ? (
-          <ImageIcon className="h-5 w-5 md:h-6 md:w-6 text-primary mr-2 md:mr-3" />
-        ) : (
-          <FolderIcon className="h-5 w-5 md:h-6 md:w-6 text-primary mr-2 md:mr-3" />
-        )}
-        <span className="text-white text-sm md:text-base truncate">
-          {item.name}
-        </span>
-      </motion.div>
-    );
-  };
+  const hasDriveAccess = localStorage.getItem("hasDriveAccess") === "true";
+  const pageTitle = currentFolder
+    ? currentFolder.name
+    : hasDriveAccess
+    ? "Meu Drive"
+    : "Pasta Compartilhada";
 
   return (
-    <div className="min-h-screen bg-background w-full h-full">
-      {/* Header com navegação */}
-      <div className="sticky top-0 z-10 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-b w-full">
-        <div className="w-full px-2 md:px-4 py-2 md:py-4">
-          <div className="flex items-center space-x-1 md:space-x-2 overflow-x-auto pb-2 md:pb-0">
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={handleBack}
-              className={cn(!currentFolder && "invisible", "flex-shrink-0")}
-            >
-              <ChevronLeft className="h-4 w-4" />
-            </Button>
-
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => navigate("/photos")}
-              className="text-muted-foreground hover:text-foreground flex-shrink-0"
-            >
-              <Home className="h-4 w-4 mr-2" />
-              <span className="hidden sm:inline">Início</span>
-            </Button>
-
-            {folderPath.map((folder, index) => (
-              <div key={folder.id} className="flex items-center flex-shrink-0">
-                <ChevronRight className="h-4 w-4 text-muted-foreground mx-1 md:mx-2" />
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => handlePathClick(folder)}
-                  className={cn(
-                    "text-muted-foreground hover:text-foreground",
-                    index === folderPath.length - 1 &&
-                      "text-foreground font-medium"
-                  )}
-                >
-                  <span className="max-w-[100px] md:max-w-[200px] truncate">
-                    {folder.name}
-                  </span>
-                </Button>
-              </div>
-            ))}
+    <div className="min-h-screen bg-black text-white p-8">
+      <div className="max-w-7xl mx-auto">
+        <div className="flex items-center justify-between mb-8">
+          <div className="flex items-center gap-4">
+            {folderPath.length > 0 && (
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={handleBackClick}
+                className="text-slate-300 hover:text-white"
+              >
+                <ArrowLeft className="w-5 h-5" />
+              </Button>
+            )}
+            <h1 className="text-2xl font-bold text-white">{pageTitle}</h1>
+          </div>
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                onClick={handleFilterByName}
+                className="border-slate-700 text-white flex items-center gap-2"
+              >
+                <Search className="w-4 h-4" />
+                Filtrar
+              </Button>
+              <Input
+                type="text"
+                placeholder="Nome do arquivo..."
+                value={nameFilter}
+                onChange={(e) => setNameFilter(e.target.value)}
+                className="bg-slate-800 border-slate-700 text-white"
+              />
+            </div>
+            <div className="relative">
+              <Button
+                variant="outline"
+                onClick={() => setShowFilterMenu(!showFilterMenu)}
+                className="border-slate-700 text-white hover:bg-slate-800 flex items-center gap-2"
+              >
+                <Filter className="w-4 h-4" />
+                Filtrar Tipo
+                <ChevronDown className="w-4 h-4" />
+              </Button>
+              {showFilterMenu && (
+                <div className="absolute right-0 mt-2 w-48 rounded-md shadow-lg bg-slate-800 ring-1 ring-black ring-opacity-5 z-10">
+                  <div className="py-1">
+                    <button
+                      onClick={() => {
+                        setFilterType("all");
+                        setShowFilterMenu(false);
+                        handleFilterByName();
+                      }}
+                      className={`w-full text-left px-4 py-2 text-sm ${
+                        filterType === "all"
+                          ? "bg-slate-700 text-white"
+                          : "text-slate-300 hover:bg-slate-700"
+                      }`}
+                    >
+                      Todos
+                    </button>
+                    <button
+                      onClick={() => {
+                        setFilterType("images");
+                        setShowFilterMenu(false);
+                        handleFilterByName();
+                      }}
+                      className={`w-full text-left px-4 py-2 text-sm ${
+                        filterType === "images"
+                          ? "bg-slate-700 text-white"
+                          : "text-slate-300 hover:bg-slate-700"
+                      }`}
+                    >
+                      Imagens
+                    </button>
+                    <button
+                      onClick={() => {
+                        setFilterType("videos");
+                        setShowFilterMenu(false);
+                        handleFilterByName();
+                      }}
+                      className={`w-full text-left px-4 py-2 text-sm ${
+                        filterType === "videos"
+                          ? "bg-slate-700 text-white"
+                          : "text-slate-300 hover:bg-slate-700"
+                      }`}
+                    >
+                      Vídeos
+                    </button>
+                    <button
+                      onClick={() => {
+                        setFilterType("folders");
+                        setShowFilterMenu(false);
+                        handleFilterByName();
+                      }}
+                      className={`w-full text-left px-4 py-2 text-sm ${
+                        filterType === "folders"
+                          ? "bg-slate-700 text-white"
+                          : "text-slate-300 hover:bg-slate-700"
+                      }`}
+                    >
+                      Pastas
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </div>
-      </div>
 
-      {/* Conteúdo */}
-      <div className="w-full h-full p-2 md:p-4">
-        {items.length === 0 ? (
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="text-center py-8 md:py-16"
-          >
-            <h2 className="text-xl md:text-2xl font-semibold mb-2 text-white">
-              {currentFolder
-                ? "Esta pasta está vazia"
-                : "Nenhum item encontrado"}
-            </h2>
-            <p className="text-muted-foreground text-sm md:text-base">
-              {currentFolder
-                ? "Adicione arquivos ou pastas para começar"
-                : "Adicione itens à sua pasta compartilhada para começar"}
-            </p>
-          </motion.div>
+        {isLoading ? (
+          <div className="flex items-center justify-center h-64">
+            <Loading className="w-8 h-8" />
+          </div>
         ) : (
-          <motion.div
-            variants={container}
-            initial="hidden"
-            animate="show"
-            className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-2 md:gap-4 w-full"
-          >
-            <AnimatePresence>
-              {items.map((item) => (
-                <motion.div
-                  key={item.id}
-                  variants={itemAnimation}
-                  layout
-                  className="group w-full"
-                  onClick={() => handleItemClick(item)}
-                >
-                  {renderItem(item)}
-                </motion.div>
-              ))}
-            </AnimatePresence>
-          </motion.div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-6">
+            {items.map(renderItem)}
+          </div>
         )}
       </div>
 
-      {/* Loading Overlay */}
-      {isLoadingMedia && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/50 backdrop-blur-sm">
-          <div className="bg-slate-800 p-6 rounded-lg flex flex-col items-center">
-            <Loader2 className="h-8 w-8 animate-spin text-primary mb-4" />
-            <p className="text-white text-lg">Carregando mídia...</p>
-          </div>
-        </div>
-      )}
-
-      {/* Modal de Foto */}
-      {selectedPhoto && photoUrl && (
+      {selectedPhoto && (
         <PhotoModal
-          isOpen={!!selectedPhoto}
-          onClose={handleCloseModal}
-          photoUrl={photoUrl}
-          photoName={selectedPhoto.name}
-          mimeType={selectedPhoto.mimeType}
+          photoUrl={`https://drive.google.com/file/d/${selectedPhoto.id}/preview`}
+          onClose={() => setSelectedPhoto(null)}
         />
       )}
     </div>
   );
-}
+};
+
+export default Photos;

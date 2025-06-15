@@ -17,21 +17,29 @@ import { Loading } from "@/components/ui/loading";
 import { useToast } from "@/hooks/use-toast";
 import type { User } from "firebase/auth";
 import { getAuth, onAuthStateChanged } from "firebase/auth";
+import { useUserData } from "@/hooks/use-user-data";
 
 const Login = () => {
   const navigate = useNavigate();
   const [isLoading, setIsLoading] = useState(false);
   const { toast } = useToast();
+  const { userData } = useUserData();
 
   useEffect(() => {
     const auth = getAuth();
     const unsubscribe = onAuthStateChanged(auth, (user: User | null) => {
-      if (user) {
-        navigate("/");
+      if (user && userData) {
+        // Se o usuário tem acesso completo, redireciona para a página inicial
+        if (userData.accessType === "full") {
+          navigate("/");
+        } else {
+          // Se o usuário tem acesso compartilhado, redireciona para as configurações
+          navigate("/settings");
+        }
       }
     });
     return () => unsubscribe();
-  }, [navigate]);
+  }, [navigate, userData]);
 
   const handleGoogleLogin = async (withDriveAccess: boolean) => {
     try {
@@ -65,6 +73,7 @@ const Login = () => {
               doc(db, "users", user.uid),
               {
                 accessType: withDriveAccess ? "full" : "shared",
+                updatedAt: new Date().toISOString(),
               },
               { merge: true }
             );
