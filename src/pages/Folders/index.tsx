@@ -86,28 +86,41 @@ const Folders = () => {
             setFolderPath(path);
           }
         } else {
-          // Se estamos na raiz, buscar a pasta compartilhada
-          const sharedFolderId = await driveService.getSharedFolderId();
-          if (sharedFolderId) {
-            const folderResponse = await fetch(
-              `${DRIVE_API_BASE_URL}/files/${sharedFolderId}?fields=id,name`,
+          // Se estamos na raiz, verificar se o usuário tem acesso total
+          const hasFullAccess =
+            localStorage.getItem("hasDriveAccess") === "true";
+          if (hasFullAccess) {
+            // Se tem acesso total, mostrar a raiz do Drive
+            setFolderPath([
               {
-                headers: {
-                  Authorization: `Bearer ${localStorage.getItem(
-                    "googleAccessToken"
-                  )}`,
-                },
-              }
-            );
-
-            if (folderResponse.ok) {
-              const folderData = await folderResponse.json();
-              setFolderPath([
+                id: "root",
+                name: "Meu Drive",
+              },
+            ]);
+          } else {
+            // Se não tem acesso total, buscar a pasta compartilhada
+            const sharedFolderId = await driveService.getSharedFolderId();
+            if (sharedFolderId) {
+              const folderResponse = await fetch(
+                `${DRIVE_API_BASE_URL}/files/${sharedFolderId}?fields=id,name`,
                 {
-                  id: folderData.id,
-                  name: folderData.name,
-                },
-              ]);
+                  headers: {
+                    Authorization: `Bearer ${localStorage.getItem(
+                      "googleAccessToken"
+                    )}`,
+                  },
+                }
+              );
+
+              if (folderResponse.ok) {
+                const folderData = await folderResponse.json();
+                setFolderPath([
+                  {
+                    id: folderData.id,
+                    name: folderData.name,
+                  },
+                ]);
+              }
             }
           }
         }

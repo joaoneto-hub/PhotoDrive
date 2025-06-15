@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { signInWithPopup, GoogleAuthProvider } from "firebase/auth";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -10,10 +9,14 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { auth } from "@/lib/firebase";
+import { authService } from "@/services/auth";
+import { doc, setDoc, getDoc } from "firebase/firestore";
+import { db } from "@/lib/firebase";
 import PhotoDrive from "../../../public/PhotoDrive.png";
 import { Loading } from "@/components/ui/loading";
 import { useToast } from "@/hooks/use-toast";
+import type { User } from "firebase/auth";
+import { getAuth, onAuthStateChanged } from "firebase/auth";
 
 const Login = () => {
   const navigate = useNavigate();
@@ -21,32 +24,52 @@ const Login = () => {
   const { toast } = useToast();
 
   useEffect(() => {
-    const unsubscribe = auth.onAuthStateChanged((user) => {
+    const auth = getAuth();
+    const unsubscribe = onAuthStateChanged(auth, (user: User | null) => {
       if (user) {
         navigate("/");
       }
     });
-
     return () => unsubscribe();
   }, [navigate]);
 
   const handleGoogleLogin = async (withDriveAccess: boolean) => {
     try {
       setIsLoading(true);
-      const provider = new GoogleAuthProvider();
+      const user = await authService.loginWithGoogle();
 
-      // Sempre adicionamos os escopos básicos do Drive, independente da escolha
-      provider.addScope("https://www.googleapis.com/auth/drive.readonly");
-      provider.addScope(
-        "https://www.googleapis.com/auth/drive.metadata.readonly"
-      );
+      if (user) {
+        // Verificar se é a primeira vez que o usuário faz login
+        const userDoc = await getDoc(doc(db, "users", user.uid));
 
-      const result = await signInWithPopup(auth, provider);
-      const credential = GoogleAuthProvider.credentialFromResult(result);
-
-      if (credential?.accessToken) {
-        localStorage.setItem("googleAccessToken", credential.accessToken);
+        // Definir o tipo de acesso antes de qualquer operação
         localStorage.setItem("hasDriveAccess", withDriveAccess.toString());
+
+        if (!userDoc.exists()) {
+          // Se for a primeira vez, salvar a preferência de acesso
+          await setDoc(doc(db, "users", user.uid), {
+            email: user.email,
+            displayName: user.displayName,
+            photoURL: user.photoURL,
+            accessType: withDriveAccess ? "full" : "shared",
+            createdAt: new Date().toISOString(),
+          });
+        } else {
+          // Se não for a primeira vez, atualizar o tipo de acesso
+          const userData = userDoc.data();
+          const currentAccessType = userData.accessType || "shared";
+
+          // Atualizar o tipo de acesso se necessário
+          if (currentAccessType !== (withDriveAccess ? "full" : "shared")) {
+            await setDoc(
+              doc(db, "users", user.uid),
+              {
+                accessType: withDriveAccess ? "full" : "shared",
+              },
+              { merge: true }
+            );
+          }
+        }
 
         toast({
           title: "Login realizado com sucesso",
@@ -61,12 +84,6 @@ const Login = () => {
         } else {
           navigate("/");
         }
-      } else {
-        toast({
-          title: "Erro ao obter token de acesso",
-          description: "Por favor, tente novamente.",
-          variant: "destructive",
-        });
       }
     } catch (error) {
       console.error("Erro ao fazer login:", error);
@@ -137,6 +154,7 @@ const Login = () => {
                   </>
                 )}
               </Button>
+
               <Button
                 variant="outline"
                 className="w-full bg-black border-slate-700 text-white cursor-pointer transition-colors"

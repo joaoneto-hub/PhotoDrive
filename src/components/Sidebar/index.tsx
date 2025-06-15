@@ -71,8 +71,10 @@ const Sidebar = () => {
                   : "text-slate-400 hover:bg-slate-900 hover:text-white"
               }`}
             >
-              <Icon className="h-5 w-5" />
-              {!isCollapsed && <span className="ml-3">{item.title}</span>}
+              <Icon className="h-5 w-5 flex-shrink-0" />
+              {!isCollapsed && (
+                <span className="ml-3 truncate">{item.title}</span>
+              )}
             </button>
           );
         })}
