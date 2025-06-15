@@ -48,36 +48,43 @@ const Login = () => {
 
       if (user) {
         // Verificar se é a primeira vez que o usuário faz login
-        const userDoc = await getDoc(doc(db, "users", user.uid));
-
-        // Definir o tipo de acesso antes de qualquer operação
-        localStorage.setItem("hasDriveAccess", withDriveAccess.toString());
+        const userRef = doc(db, "users", user.uid);
+        const userDoc = await getDoc(userRef);
 
         if (!userDoc.exists()) {
-          // Se for a primeira vez, salvar a preferência de acesso
-          await setDoc(doc(db, "users", user.uid), {
+          // Se for a primeira vez, salvar todas as informações do usuário
+          await setDoc(userRef, {
             email: user.email,
             displayName: user.displayName,
             photoURL: user.photoURL,
             accessType: withDriveAccess ? "full" : "shared",
+            sharedFolderId: null,
             createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
           });
+          localStorage.setItem("hasDriveAccess", withDriveAccess.toString());
         } else {
-          // Se não for a primeira vez, atualizar o tipo de acesso
+          // Se não for a primeira vez, verificar o tipo de acesso atual
           const userData = userDoc.data();
           const currentAccessType = userData.accessType || "shared";
 
-          // Atualizar o tipo de acesso se necessário
+          // Se o tipo de acesso escolhido for diferente do atual
           if (currentAccessType !== (withDriveAccess ? "full" : "shared")) {
-            await setDoc(
-              doc(db, "users", user.uid),
-              {
-                accessType: withDriveAccess ? "full" : "shared",
-                updatedAt: new Date().toISOString(),
-              },
-              { merge: true }
-            );
+            // Fazer logout para permitir nova escolha
+            await authService.logout();
+
+            toast({
+              title: "Tipo de acesso incompatível",
+              description: `Você já possui uma conta com acesso ${
+                currentAccessType === "full" ? "geral" : "por link"
+              }. Por favor, faça login novamente escolhendo o tipo de acesso correto.`,
+              variant: "destructive",
+            });
+            return;
           }
+
+          // Se o tipo de acesso for o mesmo, apenas atualiza o localStorage
+          localStorage.setItem("hasDriveAccess", withDriveAccess.toString());
         }
 
         toast({

@@ -27,7 +27,7 @@ export interface DriveFolder extends DriveItem {
   items: DriveItem[];
 }
 
-class DriveService {
+export class DriveService {
   private async getAccessToken(): Promise<string> {
     const auth = getAuth();
     const user = auth.currentUser;
@@ -72,14 +72,25 @@ class DriveService {
   async listAllFiles(folderId?: string): Promise<DriveItem[]> {
     const accessToken = await this.getAccessToken();
     const hasDriveAccess = localStorage.getItem("hasDriveAccess") === "true";
+    const isSharedLink = window.location.search.includes("folder=");
 
     let query = "https://www.googleapis.com/drive/v3/files?";
 
-    // Se tiver acesso geral, usa a lógica normal
-    if (hasDriveAccess) {
-      if (folderId) {
+    // Se for um link compartilhado, só acessa a pasta específica
+    if (isSharedLink) {
+      const sharedFolderId =
+        folderId || new URLSearchParams(window.location.search).get("folder");
+      if (!sharedFolderId) {
+        throw new Error("Shared folder ID not found");
+      }
+      query += `q='${sharedFolderId}' in parents and trashed=false&`;
+    }
+    // Se tiver acesso geral ao drive
+    else if (hasDriveAccess) {
+      if (folderId && folderId !== "root") {
         query += `q='${folderId}' in parents and trashed=false&`;
       } else {
+        // Se não tiver folderId específico, lista todos os arquivos do drive
         query += "q=trashed=false&";
       }
     }
@@ -146,14 +157,25 @@ class DriveService {
   async listFolders(folderId?: string): Promise<DriveItem[]> {
     const accessToken = await this.getAccessToken();
     const hasDriveAccess = localStorage.getItem("hasDriveAccess") === "true";
+    const isSharedLink = window.location.search.includes("folder=");
 
     let query = "https://www.googleapis.com/drive/v3/files?";
 
-    // Se tiver acesso geral, usa a lógica normal
-    if (hasDriveAccess) {
+    // Se for um link compartilhado, só acessa a pasta específica
+    if (isSharedLink) {
+      const sharedFolderId =
+        folderId || new URLSearchParams(window.location.search).get("folder");
+      if (!sharedFolderId) {
+        throw new Error("Shared folder ID not found");
+      }
+      query += `q='${sharedFolderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false&`;
+    }
+    // Se tiver acesso geral ao drive
+    else if (hasDriveAccess) {
       if (folderId && folderId !== "root") {
         query += `q='${folderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false&`;
       } else {
+        // Se não tiver folderId específico, lista todas as pastas do drive
         query +=
           "q=mimeType='application/vnd.google-apps.folder' and trashed=false&";
       }
@@ -164,9 +186,7 @@ class DriveService {
       if (!sharedFolderId) {
         throw new Error("Shared folder ID not found");
       }
-      // Se tiver um folderId específico, usa ele, senão usa o sharedFolderId
-      const targetFolderId = folderId || sharedFolderId;
-      query += `q='${targetFolderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false&`;
+      query += `q='${sharedFolderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false&`;
     }
 
     query +=
@@ -411,6 +431,100 @@ class DriveService {
     );
 
     localStorage.setItem("sharedFolderId", folderId);
+  }
+
+  async uploadFile(file: File, folderId: string): Promise<void> {
+    try {
+      const accessToken = await this.getAccessToken();
+      const metadata = {
+        name: file.name,
+        mimeType: file.type,
+        parents: [folderId],
+      };
+
+      const form = new FormData();
+      form.append(
+        "metadata",
+        new Blob([JSON.stringify(metadata)], { type: "application/json" })
+      );
+      form.append("file", file);
+
+      const response = await fetch(
+        `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: form,
+        }
+      );
+
+      if (!response.ok) {
+        if (response.status === 401) {
+          // Token expirado, tentar atualizar
+          await this.refreshToken();
+          return this.uploadFile(file, folderId);
+        }
+        throw new Error(`Failed to upload file: ${response.statusText}`);
+      }
+    } catch (error) {
+      console.error("Error uploading file:", error);
+      throw error;
+    }
+  }
+
+  async createFolder(name: string, parentFolderId: string): Promise<void> {
+    try {
+      const accessToken = await this.getAccessToken();
+      const metadata = {
+        name: name,
+        mimeType: "application/vnd.google-apps.folder",
+        parents: [parentFolderId],
+      };
+
+      const response = await fetch(
+        "https://www.googleapis.com/drive/v3/files",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(metadata),
+        }
+      );
+
+      if (!response.ok) {
+        if (response.status === 401) {
+          // Token expirado, tentar atualizar
+          await this.refreshToken();
+          return this.createFolder(name, parentFolderId);
+        }
+        throw new Error(`Failed to create folder: ${response.statusText}`);
+      }
+    } catch (error) {
+      console.error("Error creating folder:", error);
+      throw error;
+    }
+  }
+
+  private async refreshToken(): Promise<void> {
+    try {
+      const auth = getAuth();
+      const user = auth.currentUser;
+      if (!user) {
+        throw new Error("No user logged in");
+      }
+
+      const credential = await user.getIdToken(true);
+      if (!credential) {
+        throw new Error("Failed to refresh token");
+      }
+    } catch (error) {
+      console.error("Error refreshing token:", error);
+      throw error;
+    }
   }
 }
 
